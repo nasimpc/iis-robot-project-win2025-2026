@@ -29,7 +29,7 @@ Mount joint encoders, odometry, and rgbd cameras. Implement denoising and data s
 Detect objects and obstacles based of predefined attributes such as color, size. Identify the table plane using **RANSAC**. Use **PCA** (Principal Component Analysis) on the object/obstacle point cloud to find the optimal pose, which is essential for obstacle avoidance and grasping.
 
 ### [M5] State Estimation
-Implement a **Kalman Filter** to fuse noisy sensor data and control inputs into a reliable state estimate $(\hat{x}, \hat{y}, \hat{\theta})$.
+Implement a **Kalman Filter** to fuse noisy sensor data and control inputs into a reliable state estimate $$(\hat{x}, \hat{y}, \hat{\theta})$$.
 
 ### [M6] Motion Control
 Develop **PID Controllers** for both wheel navigation and arm manipulation. Address steady-state errors and overshoot.
