@@ -91,9 +91,25 @@ Integrate all modules into a unified "Sense-Think-Act" loop in `notebooks/cognit
 - **Optimization**, 10% (Speed/Performance)
 
 
-## 8. Working online directly on BinderHub
+## 8.  🐳 Docker Installation & Launch Guide
 
-Click below to run the system online. Please, note that the online work is volatile. **Save your work from time to time on your local computer.**
+Run the following commands in sequence to set up the environment, configure permissions, and launch the simulation:
 
-[<img src="https://mybinder.org/badge_logo.svg">](https://binder.intel4coro.de/v2/gh/fkenghagho/iis-robot-project-win2025-2026/HEAD?labpath=notebooks/cognitive_architecture.ipynb)
+```bash
+# 1. Install Docker Compose
+sudo apt-get update && sudo apt-get install docker-compose-plugin
 
+# 2. Add user to Docker group & apply permissions
+sudo usermod -aG docker $USER && newgrp docker
+
+# 3. Grant GUI access for X11 (Required for PyBullet window)
+xhost +local:docker
+
+# 4. Build and Launch the simulation
+docker compose up --build
+
+# 5. Next Launches of the simulation
+docker compose up
+
+```
+Note that your working directory on the local machine is linked to the working directory of the container. Changes on your local machine are directly reflected on the docker container. Hence, no need to rebuild the container.
