@@ -177,7 +177,7 @@ Note that your working directory on the local machine is linked to the working d
 2. You must maintain the following while structure in your main function:
 ```bash
  while p.isConnected(): # DO NOT TOUCH
-       # file with your sense-think-act       
+       # fill with your sense-think-act       
        p.stepSimulation()  # DO NOT TOUCH
        time.sleep(1./240.) # DO NOT TOUCH
 ```
