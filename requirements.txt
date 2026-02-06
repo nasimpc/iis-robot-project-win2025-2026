@@ -4,6 +4,7 @@ pybullet==3.2.5
 # Math & State Estimation (Particle Filter / PCA)
 numpy>=1.22.0
 scipy>=1.7.0
+scikit-learn>=1.0.0
 
 # Knowledge Representation (Logic)
 pyswip

@@ -202,6 +202,15 @@ def build_world(physics_client=None):
     print(f"Target ID: {target_id} (position must be perceived by robot)")
     print("=" * 60)
     
+    # Set camera to get a nice overview of the scene
+    # Position camera to look at center of room from above and side
+    p.resetDebugVisualizerCamera(
+        cameraDistance=12.0,
+        cameraYaw=45,
+        cameraPitch=-35,
+        cameraTargetPosition=[0, 0, 0]
+    )
+    
     return scene_map
 
 

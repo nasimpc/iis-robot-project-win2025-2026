@@ -16,6 +16,10 @@ Thumbs.db
 *.log
 output/
 imgs/
+learned_parameters.json
+experience_buffer.json
+*.png
+docker_output.log
 
 # VS Code / IDE
 .vscode/
