@@ -11,6 +11,7 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.robot.sensor_wrapper import *
+from src.environment.world_builder import build_world
 
 ####################### Function Signature #################################
 
@@ -82,8 +83,8 @@ def save_camera_data(rgb, depth, filename_prefix="frame"):
 ############################### Inverse Kinematics ##############################
 
 def move_arm_to_coordinate(arm_id, target_id):
-    # Joint 6 is the last joint (lbr_iiwa_joint_7)
-    end_effector_index = 6 
+    # Joint 11 is the last arm joint (arm_joint_7) in the custom robot
+    end_effector_index = 11 
     
     #0. get target pose
     target_pos, target_orn = p.getBasePositionAndOrientation(target_id)
@@ -92,12 +93,12 @@ def move_arm_to_coordinate(arm_id, target_id):
     # 1. Compute Inverse Kinematics
     joint_poses = p.calculateInverseKinematics(
                   bodyUniqueId=arm_id,
-                  endEffectorLinkIndex=6,
+                  endEffectorLinkIndex=end_effector_index,
                   targetPosition=target_pos
     )
     
-    # 2. Command all 7 joints
-    for i in range(7):
+    # 2. Command all 7 arm joints (indices 5-11 in the custom robot)
+    for i in range(5, 12):
         p.setJointMotorControl2(
             bodyIndex=arm_id, 
             jointIndex=i, 
@@ -159,23 +160,23 @@ def pid_to_target(robot_id, target_pos):
     # 4. ACT: Apply raw torque to wheels
     """
     # Torque-based Control
-    for i in [2, 4]: # Left
+    for i in [0, 2]: # Left (wheel_fl, wheel_bl)
         p.setJointMotorControl2(robot_id, i, p.TORQUE_CONTROL, force=left_torque)
-    for i in [3, 5]: # Righ
+    for i in [1, 3]: # Right (wheel_fr, wheel_br)
         p.setJointMotorControl2(robot_id, i, p.TORQUE_CONTROL, force=right_torque)
     """
     """
     # Position-based Control
     posi=posi+0.1
-    for i in [2, 4]: # Left
+    for i in [0, 2]: # Left (wheel_fl, wheel_bl)
         p.setJointMotorControl2(robot_id, i, p.POSITION_CONTROL, targetPosition=-posi, maxVelocity=20.0, force=1500.)
-    for i in [3, 5]: # Righ
+    for i in [1, 3]: # Right (wheel_fr, wheel_br)
         p.setJointMotorControl2(robot_id, i, p.POSITION_CONTROL, targetPosition=posi, maxVelocity=20.0, force=1500.)
     """
     # Velocity-based Control
-    for i in [2, 4]: # Left
+    for i in [0, 2]: # Left (wheel_fl, wheel_bl)
         p.setJointMotorControl2(robot_id, i, p.VELOCITY_CONTROL, targetVelocity=-1.0, force=1500.)
-    for i in [3, 5]: # Righ
+    for i in [1, 3]: # Right (wheel_fr, wheel_br)
         p.setJointMotorControl2(robot_id, i, p.VELOCITY_CONTROL, targetVelocity=1.0, force=1500.)
     dist_error=1.0
     return dist_error
@@ -185,29 +186,20 @@ def pid_to_target(robot_id, target_pos):
 
 
 def setup_simulation():
-    p.connect(p.GUI)
-    p.setAdditionalSearchPath(pybullet_data.getDataPath())
-    p.setGravity(0, 0, -9.81)
-
-    # 1. Spawn the Room
-    room_id=p.loadURDF("../src/environment/room.urdf", [0, 0, 0], useFixedBase=True)
-
-    # 2. Spawn the Target Table
-    table_id = p.loadURDF("table/table.urdf", basePosition=[2, 2, 0.0], useFixedBase=True)
-    #Overwrite table mass
-    #p.changeDynamics(table_id, -1, mass=10.0)
-
-    # 3. Spawn Obstacles (Random Blocks)
-    # A heavy crate
-    p.loadURDF("block.urdf", basePosition=[1, 0, 0.1], globalScaling=5.0) 
-    # A simple block obstacle
-    target_id=p.loadURDF("block.urdf", basePosition=[1.8, 1.8, 0.8], globalScaling=2.0)
-
-    # 4. Spawn the Husky Robot
-    robot_id = p.loadURDF("husky/husky.urdf", basePosition=[-3, -3, 0.2])
+    """
+    Sets up the simulation using the project's world_builder module.
+    This ensures we use the correct custom robot and environment URDFs.
+    """
+    scene_map = build_world()
     
-    # 5. Spawn the Gripper on the Table
-    arm_id = p.loadURDF("kuka_iiwa/model.urdf", [2, 2, 0.625], useFixedBase=True)
+    robot_id = scene_map['robot_id']
+    table_id = scene_map['table_id']
+    room_id = scene_map['room_id']
+    target_id = scene_map['target_id']
+    
+    # The custom robot has an integrated arm (not a separate body)
+    # arm_id is the same as robot_id since the arm is part of the mobile manipulator
+    arm_id = robot_id
     
     return robot_id, table_id, room_id, arm_id, target_id
 ##########################################################################################################
@@ -217,13 +209,13 @@ def main():
     robot_id, table_id, room_id, arm_id, target_id = setup_simulation()
     print(get_joint_map(arm_id))
     
-    print("Room initialized. Husky is at (-3, -3). Table is at (2, 2).")
+    print("Room initialized. Robot is at (-3, -3). Table randomly placed.")
 
     target = [2, 2, 0] # The table position
     
     """
     # Run this ONCE before your simulation loop in p.TORQUE_CONTROL
-    for i in [2, 3, 4, 5]:
+    for i in [0, 1, 2, 3]:  # Wheel joints in custom robot
       p.setJointMotorControl2(
         bodyUniqueId=robot_id, 
         jointIndex=i, 
@@ -247,8 +239,8 @@ def main():
        print ('Distance: ', dist)
        if dist < 2:
              print("Target Reached!")
-             # Apply braking torque
-             for i in range(2, 6):
+             # Apply braking torque to all 4 wheels (indices 0-3)
+             for i in range(0, 4):
                  p.setJointMotorControl2(
                      bodyUniqueId=robot_id, 
                      jointIndex=i, 
