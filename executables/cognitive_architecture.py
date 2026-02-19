@@ -12,6 +12,9 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.robot.sensor_wrapper import *
 from src.environment.world_builder import build_world
+from src.modules.state_estimation import ParticleFilterEstimator
+
+
 
 ####################### Function Signature #################################
 
@@ -225,6 +228,8 @@ def main():
       )
      """
     
+    estimator = ParticleFilterEstimator()
+    
     step_counter=0
     ##################### LOOP STRUCTURE ############################################
     while p.isConnected(): # DO NOT TOUCH
@@ -237,6 +242,10 @@ def main():
        move_arm_to_coordinate(arm_id, target_id)  
        dist = pid_to_target(robot_id, target)
        print ('Distance: ', dist)
+
+       x, y, theta = estimator.update(robot_id)
+       print(f"PF Pose -> x:{x:.2f}, y:{y:.2f}, theta:{theta:.2f}")
+
        if dist < 2:
              print("Target Reached!")
              # Apply braking torque to all 4 wheels (indices 0-3)
