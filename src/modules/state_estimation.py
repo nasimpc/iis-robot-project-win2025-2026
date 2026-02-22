@@ -1,118 +1,168 @@
 """
-Module 5: State Estimation
-
-Particle Filter implementation for robot pose estimation.
-Estimates (x, y, theta) using probabilistic particles.
+Module 5: State Estimation – Particle Filter
+Estimates robot pose (x, y, theta) using odometry and landmark observations.
 """
 
-import pybullet as p
 import numpy as np
-
-# Helper function to convert quaternion to yaw angle
-def quaternion_to_yaw(q):
-    x, y, z, w = q
-    siny_cosp = 2 * (w * z + x * y)
-    cosy_cosp = 1 - 2 * (y * y + z * z)
-    return np.arctan2(siny_cosp, cosy_cosp)
+from typing import List, Tuple, Dict, Optional
 
 
-class ParticleFilterEstimator:
+class Particle:
+    """A single particle representing a hypothesis of the robot's pose."""
+    def __init__(self, x: float, y: float, theta: float, weight: float = 1.0):
+        self.x = x
+        self.y = y
+        self.theta = theta
+        self.weight = weight
 
-    # Number of particles in the filter
-    def __init__(self, num_particles=200):
+
+class ParticleFilter:
+    """
+    Particle filter for 2D robot pose estimation.
+
+    Attributes:
+        num_particles (int): Number of particles.
+        particles (List[Particle]): List of particles.
+        map_landmarks (Dict[int, Tuple[float, float]]): Known landmark positions
+            {id: (x, y)}. IDs: 0 = table, 1..5 = obstacles.
+        motion_noise (Tuple[float, float, float]): Noise std for (x, y, theta) in prediction.
+        measurement_noise (float): Std deviation for landmark distance measurement.
+    """
+    def __init__(self,
+                 num_particles: int,
+                 initial_pose: Tuple[float, float, float],
+                 map_landmarks: Dict[int, Tuple[float, float]],
+                 motion_noise: Tuple[float, float, float] = (0.02, 0.02, 0.05),
+                 measurement_noise: float = 0.1):
+        """
+        Args:
+            num_particles: Number of particles.
+            initial_pose: (x, y, theta) starting pose.
+            map_landmarks: Dictionary of known landmarks {id: (x, y)}.
+            motion_noise: (std_x, std_y, std_theta) for motion model.
+            measurement_noise: Std dev for landmark distance measurement.
+        """
         self.num_particles = num_particles
-        
-        # Particles: [x, y, theta]
-        self.particles = np.zeros((num_particles, 3))
-        
-        # Weights
-        self.weights = np.ones(num_particles) / num_particles
+        self.map_landmarks = map_landmarks
+        self.motion_noise = motion_noise
+        self.measurement_noise = measurement_noise
 
-        # Initialize randomly in environment
-        self.init_particles()
+        # Initialize particles around the initial pose with small noise
+        self.particles = []
+        for _ in range(num_particles):
+            x = initial_pose[0] + np.random.normal(0, 0.05)
+            y = initial_pose[1] + np.random.normal(0, 0.05)
+            theta = initial_pose[2] + np.random.normal(0, 0.05)
+            self.particles.append(Particle(x, y, theta, 1.0 / num_particles))
 
-    # Initialize particles randomly in the environment
-    def init_particles(self):
+    def predict(self, v: float, omega: float, dt: float):
         """
-        Initialize particles randomly in the room.
+        Motion update: move each particle according to the control input (odometry).
+
+        Args:
+            v: Linear velocity (m/s) in robot's forward direction.
+            omega: Angular velocity (rad/s).
+            dt: Time step (s).
         """
-        # Room approx [-5,5] range
-        self.particles[:, 0] = np.random.uniform(-5, 5, self.num_particles)
-        self.particles[:, 1] = np.random.uniform(-5, 5, self.num_particles)
-        self.particles[:, 2] = np.random.uniform(-np.pi, np.pi, self.num_particles)
+        for p in self.particles:
+            # Add noise to control inputs
+            v_noisy = v + np.random.normal(0, self.motion_noise[0])
+            omega_noisy = omega + np.random.normal(0, self.motion_noise[2])
 
-    # Motion update based on robot's movement (placeholder, extend with actual odometry)
-    def motion_update(self, robot_id):
+            # Update pose using differential drive kinematics
+            p.x += v_noisy * dt * np.cos(p.theta)
+            p.y += v_noisy * dt * np.sin(p.theta)
+            p.theta += omega_noisy * dt
 
-        pos, orn = p.getBasePositionAndOrientation(robot_id)
-        theta = quaternion_to_yaw(orn)
+            # Normalise angle to [-pi, pi]
+            p.theta = (p.theta + np.pi) % (2 * np.pi) - np.pi
 
-        # Move particles toward robot motion
-        noise_pos = np.random.normal(0, 0.02, (self.num_particles, 2))
-        noise_theta = np.random.normal(0, 0.03, self.num_particles)
+            # Add extra pose noise (independent of control)
+            p.x += np.random.normal(0, self.motion_noise[0] * dt)
+            p.y += np.random.normal(0, self.motion_noise[1] * dt)
+            p.theta += np.random.normal(0, self.motion_noise[2] * dt)
+            p.theta = (p.theta + np.pi) % (2 * np.pi) - np.pi
 
-        self.particles[:, 0] += noise_pos[:, 0]
-        self.particles[:, 1] += noise_pos[:, 1]
-        self.particles[:, 2] += noise_theta
-
-        # Keep particles inside environment
-        self.particles[:, 0] = np.clip(self.particles[:, 0], -5, 5)
-        self.particles[:, 1] = np.clip(self.particles[:, 1], -5, 5)
-
-    # Sensor update based on proximity to real robot pose (placeholder, extend with perception)
-    def sensor_update(self, robot_id):
-        # TODO: replace with perception-based likelihood
+    def update(self, landmark_id: int, observed_rel_pos: Tuple[float, float]):
         """
-        Weight particles based on proximity to real robot pose.
-        (Placeholder sensor model, extend later with perception)
+        Measurement update: adjust particle weights based on observed landmark.
+
+        Args:
+            landmark_id: ID of the observed landmark (must exist in map_landmarks).
+            observed_rel_pos: (dx, dy) position of the landmark relative to robot
+                              (in robot base frame: x forward, y left).
         """
-        real_pos, real_orn = p.getBasePositionAndOrientation(robot_id)
-        real_theta = quaternion_to_yaw(real_orn)
+        if landmark_id not in self.map_landmarks:
+            return  # Unknown landmark, ignore
 
-        dx = self.particles[:, 0] - real_pos[0]
-        dy = self.particles[:, 1] - real_pos[1]
-        dtheta = self.particles[:, 2] - real_theta
+        landmark_true = self.map_landmarks[landmark_id]  # (x, y) in world
+        dx_obs, dy_obs = observed_rel_pos
 
-        dist = np.sqrt(dx**2 + dy**2)
+        for p in self.particles:
+            # Predict what the landmark's relative position should be from this particle
+            dx_world = landmark_true[0] - p.x
+            dy_world = landmark_true[1] - p.y
 
-        # Gaussian likelihood
-        self.weights = np.exp(-dist**2 / 0.1) + 1e-300
-        self.weights /= np.sum(self.weights)
+            # Rotate into robot's frame (particle's heading)
+            cos_t = np.cos(p.theta)
+            sin_t = np.sin(p.theta)
+            dx_pred = dx_world * cos_t + dy_world * sin_t   # forward
+            dy_pred = -dx_world * sin_t + dy_world * cos_t  # left
 
-    # Resample particles based on weights
+            # Compute error (Euclidean distance)
+            err = np.sqrt((dx_pred - dx_obs)**2 + (dy_pred - dy_obs)**2)
+
+            # Gaussian likelihood
+            likelihood = (1.0 / (np.sqrt(2 * np.pi) * self.measurement_noise)) * \
+                         np.exp(-0.5 * (err / self.measurement_noise)**2)
+
+            p.weight *= likelihood
+
+        # Normalise weights
+        total_weight = sum(p.weight for p in self.particles)
+        if total_weight > 0:
+            for p in self.particles:
+                p.weight /= total_weight
+        else:
+            # If all weights zero, reset to uniform
+            for p in self.particles:
+                p.weight = 1.0 / self.num_particles
+
     def resample(self):
+        """Systematic resampling to avoid particle depletion."""
+        new_particles = []
+        N = self.num_particles
 
-        indices = np.random.choice(
-            self.num_particles,
-            self.num_particles,
-            p=self.weights
-        )
-        self.particles = self.particles[indices]
+        # Compute cumulative weights
+        cum_weights = np.cumsum([p.weight for p in self.particles])
 
-        # Inject random particles (kidnapped robot recovery)
-        num_random = int(0.1 * self.num_particles)
-        self.particles[:num_random, 0] = np.random.uniform(-5, 5, num_random)
-        self.particles[:num_random, 1] = np.random.uniform(-5, 5, num_random)
-        self.particles[:num_random, 2] = np.random.uniform(-np.pi, np.pi, num_random)
+        # Systematic resampling
+        step = 1.0 / N
+        r = np.random.uniform(0, step)
+        j = 0
+        for i in range(N):
+            u = r + i * step
+            while u > cum_weights[j]:
+                j += 1
+            # Copy particle j with small jitter to maintain diversity
+            p = self.particles[j]
+            x = p.x + np.random.normal(0, 0.01)
+            y = p.y + np.random.normal(0, 0.01)
+            theta = p.theta + np.random.normal(0, 0.01)
+            new_particles.append(Particle(x, y, theta, 1.0 / N))
 
-        self.weights.fill(1.0 / self.num_particles)
+        self.particles = new_particles
 
-    # Estimate pose as mean of particles
-    def estimate(self):
-        """
-        Compute estimated pose from particles.
-        """
-        x = np.mean(self.particles[:, 0])
-        y = np.mean(self.particles[:, 1])
-        theta = np.mean(self.particles[:, 2])
-        return x, y, theta
+    def get_estimate(self) -> Tuple[float, float, float]:
+        """Return the weighted mean pose as the best estimate."""
+        x_mean = np.average([p.x for p in self.particles], weights=[p.weight for p in self.particles])
+        y_mean = np.average([p.y for p in self.particles], weights=[p.weight for p in self.particles])
+        # Circular mean for angle
+        sin_sum = np.average([np.sin(p.theta) for p in self.particles], weights=[p.weight for p in self.particles])
+        cos_sum = np.average([np.cos(p.theta) for p in self.particles], weights=[p.weight for p in self.particles])
+        theta_mean = np.arctan2(sin_sum, cos_sum)
+        return x_mean, y_mean, theta_mean
 
-    # Full update step
-    def update(self, robot_id):
-        """
-        Full particle filter step.
-        """
-        self.motion_update(robot_id)
-        self.sensor_update(robot_id)
-        self.resample()
-        return self.estimate()
+    def get_particles(self) -> List[Particle]:
+        """Return all particles (for debugging / visualisation)."""
+        return self.particles
