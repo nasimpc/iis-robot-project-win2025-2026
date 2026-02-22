@@ -174,6 +174,11 @@ def build_world(physics_client=None):
     
     target_path = os.path.join(ENVIRONMENT_DIR, 'target.urdf')
     target_id = p.loadURDF(target_path, target_position, useFixedBase=False)
+    landmark_map = {
+        0: table_position,  # table
+    }
+    for i, pos in enumerate(obstacle_positions):
+        landmark_map[i + 1] = pos
     
     # ==================== BUILD SCENE MAP ====================
     # Note: Target position is NOT included - robot must perceive it
@@ -187,6 +192,7 @@ def build_world(physics_client=None):
         'obstacle_positions': obstacle_positions,
         'obstacle_colors': obstacle_color_names,
         'target_id': target_id,
+        'landmark_map': landmark_map,
         # Target position intentionally NOT included
     }
     
