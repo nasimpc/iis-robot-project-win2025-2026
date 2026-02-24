@@ -13,6 +13,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.robot.sensor_wrapper import *
 from src.environment.world_builder import build_world
 from src.modules.state_estimation import ParticleFilterEstimator
+from src.modules.action_planning import ActionSequencer
 
 
 
@@ -229,6 +230,7 @@ def main():
      """
     
     estimator = ParticleFilterEstimator()
+    sequencer = ActionSequencer()
     
     step_counter=0
     ##################### LOOP STRUCTURE ############################################
@@ -245,6 +247,24 @@ def main():
 
        x, y, theta = estimator.update(robot_id)
        print(f"PF Pose -> x:{x:.2f}, y:{y:.2f}, theta:{theta:.2f}")
+       
+       # Mock perception data (MODIFY THIS LATER TO CONNECT WITH YOUR SENSOR WRAPPER)
+       perception_info = {
+           'target_found': dist < 5.0,
+           'in_gripper': False
+       }
+
+       # Update FSM state
+       current_pose = [x, y, theta]
+       sequencer.update_state(perception_info, current_pose, dist)
+       state = sequencer.get_current_action()
+       print(f"Current State: {state}")
+
+       # Execute behavior based on state
+       if state == "NAVIGATE":
+           move_arm_to_coordinate(arm_id, target_id)
+       elif state == "GRASP":
+           print("Executing Grasp Sequence...")
 
        if dist < 2:
              print("Target Reached!")
