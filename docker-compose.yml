@@ -5,7 +5,7 @@ services:
     build: 
       context: .        # Builds from the project root
       dockerfile: Dockerfile
-    container_name: robotics_lab
+    container_name: robotics_lab5
     network_mode: "host"
     environment:
       - DISPLAY=${DISPLAY}
@@ -22,4 +22,4 @@ services:
     working_dir: /home/jovyan/work/executables
     
     # Default command (can be overridden by docker-compose run)
-    command: python3 cognitive_architecture.py
+    command: python3 run_world_builder.py --headless
