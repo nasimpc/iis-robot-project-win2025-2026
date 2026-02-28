@@ -135,6 +135,7 @@ def build_world (physics_client =None ):
     'obstacle_positions':obstacle_positions ,
     'obstacle_colors':obstacle_color_names ,
     'target_id':target_id ,
+    'target_position':target_position ,
     'landmark_map':landmark_map ,
 
     }
@@ -158,6 +159,22 @@ def get_object_position (body_id ):
     pos ,_ =p .getBasePositionAndOrientation (body_id )
     return list (pos )
 
+
+def get_robot_pose(robot_id):
+    """Authorised wrapper for p.getBasePositionAndOrientation().
+
+    All other modules MUST call this instead of using the PyBullet
+    function directly (project constraint #2).
+
+    Returns
+    -------
+    pos   : tuple(float, float, float)
+    orn   : tuple(float, float, float, float)  – quaternion
+    euler : tuple(float, float, float)          – (roll, pitch, yaw)
+    """
+    pos, orn = p.getBasePositionAndOrientation(robot_id)
+    euler = p.getEulerFromQuaternion(orn)
+    return pos, orn, euler
 
 
 if __name__ =="__main__":
