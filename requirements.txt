@@ -14,3 +14,4 @@ opencv-python-headless>=4.5.0
 # Integration & Presentation
 pyvirtualdisplay  # For headless Binder rendering
 matplotlib        # For plotting Particle Filter distributions
+scikit-learn
