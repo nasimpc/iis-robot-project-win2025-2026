@@ -22,4 +22,4 @@ services:
     working_dir: /home/jovyan/work/executables
     
     # Default command (can be overridden by docker-compose run)
-    command: python3 run_world_builder.py --headless
+    command: python3 cognitive_architecture.py --steps 10000
