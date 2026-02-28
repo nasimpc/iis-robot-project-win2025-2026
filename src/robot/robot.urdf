@@ -460,6 +460,44 @@
   </joint>
 
   <!-- ==================== SENSORS ==================== -->
+  <!-- LIDAR (on top of base) -->
+  <link name="lidar_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.03" length="0.02"/>
+      </geometry>
+      <material name="silver">
+        <color rgba="0.8 0.8 0.8 1.0"/>
+      </material>
+    </visual>
+    <!-- Visible forward beam to indicate LIDAR direction -->
+    <visual>
+      <origin xyz="0.3 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.6 0.01 0.01"/>
+      </geometry>
+      <material name="red_beam">
+        <color rgba="1 0 0 0.7"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.03" length="0.02"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.2"/>
+      <inertia ixx="0.0005" ixy="0" ixz="0" iyy="0.0005" iyz="0" izz="0.0006"/>
+    </inertial>
+  </link>
+  <joint name="lidar_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="lidar_link"/>
+    <origin xyz="0.31 0 0.16" rpy="0 0 0"/>
+  </joint>
+
   <!-- IMU Sensor Link (on base) -->
   <link name="imu_link">
     <visual>
@@ -509,7 +547,33 @@
   <joint name="camera_joint" type="fixed">
     <parent link="gripper_base"/>
     <child link="camera_link"/>
-    <origin xyz="0.04 0 0" rpy="0 1.5708 0"/>
+    <origin xyz="0.04 0 0" rpy="0 -1.5708 0"/>
   </joint>
+
+  <!-- Gazebo LIDAR sensor attachment for `lidar_link` -->
+  <gazebo reference="lidar_link">
+    <sensor type="ray" name="lidar_sensor">
+      <pose>0 0 0 0 0 0</pose>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>360</samples>
+            <resolution>1</resolution>
+            <min_angle>-1.5708</min_angle>
+            <max_angle>1.5708</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.1</min>
+          <max>30</max>
+        </range>
+      </ray>
+      <update_rate>200</update_rate>
+      <plugin name="gazebo_ros_laser" filename="libgazebo_ros_laser.so">
+        <topicName>/scan</topicName>
+        <frameName>lidar_link</frameName>
+      </plugin>
+    </sensor>
+  </gazebo>
 
 </robot>

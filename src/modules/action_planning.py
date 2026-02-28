@@ -1,54 +1,60 @@
-import time
+import time 
 
-class ActionSequencer:
-    def __init__(self):
-        self.states = ["SEARCH", "NAVIGATE", "GRASP", "COMPLETED"]
-        self.current_state = "SEARCH"
-        self.target_perceived = False
-        self.at_destination = False
-        self.grasp_success = False
-        self.retry_count = 0
 
-    def update_state(self, perception_data, robot_pose, target_dist):
-        if self.current_state == "SEARCH":
-            if perception_data['target_found']:
-                self.target_perceived = True
-                self.current_state = "NAVIGATE"
-            else:
-                self.execute_search_behavior()
+class ActionSequencer :
+    
 
-        elif self.current_state == "NAVIGATE":
-            if not perception_data['target_found']:
-                # Failure recovery: target lost during navigation
-                self.current_state = "SEARCH"
-            elif target_dist < 0.5: # Threshold to start grasping
-                self.current_state = "GRASP"
-            else:
-                self.execute_navigation_behavior()
+    def __init__ (self ):
+        self .states =["SEARCH","NAVIGATE","GRASP","COMPLETED"]
+        self .current_state ="SEARCH"
+        self .retry_count =0 
+        self .max_retries =3 
+        self .grasp_started =False 
+        self .grasp_step =0 
+        self .overscan_counter =0 
 
-        elif self.current_state == "GRASP":
-            if perception_data['in_gripper']:
-                self.current_state = "COMPLETED"
-            elif self.retry_count > 3:
-                # Failure recovery: back to search if grasp fails repeatedly
-                self.retry_count = 0
-                self.current_state = "SEARCH"
-            else:
-                self.execute_grasp_behavior()
-                self.retry_count += 1
 
-    def execute_search_behavior(self):
-        # Logic to rotate or move randomly to find target
-        pass
+    def update_state (self ,perception_output ,robot_pose ,target_dist ):
+        
+        if self .current_state =="SEARCH":
+            if perception_output .get ('target_found',False ):
+                self .overscan_counter +=1 
+                if self .overscan_counter >50 :
+                    self .current_state ="NAVIGATE"
+                    print ("[FSM] Target found and verified — switching to NAVIGATE")
+            else :
+                self .overscan_counter =0 
 
-    def execute_navigation_behavior(self):
-        # Call motion_control to move towards target_pos
-        pass
+        elif self .current_state =="NAVIGATE":
+            if not perception_output .get ('target_found',False ):
 
-    def execute_grasp_behavior(self):
-        # Sequence to move arm and close gripper
-        pass
+                self .lost_target_counter =getattr (self ,'lost_target_counter',0 )+1 
+                if self .lost_target_counter >50 :
+                    self .current_state ="SEARCH"
+                    print ("[FSM] Target lost — returning to SEARCH")
+            else :
+                self .lost_target_counter =0 
 
-    def get_current_action(self):
-        return self.current_state
+            if self .current_state =="NAVIGATE"and target_dist <0.65 :
+                self .current_state ="GRASP"
+                self .grasp_started =False 
+                self .grasp_step =0 
+                print ("[FSM] Close enough — switching to GRASP")
 
+
+        elif self .current_state =="GRASP":
+            if perception_output .get ('in_gripper',False ):
+                self .current_state ="COMPLETED"
+                print ("[FSM] Object grasped — COMPLETED!")
+            elif self .retry_count >=self .max_retries :
+                self .retry_count =0 
+                self .current_state ="SEARCH"
+                print ("[FSM] Grasp failed too many times — returning to SEARCH")
+
+
+    def mark_grasp_attempt (self ):
+        
+        self .retry_count +=1 
+
+    def get_current_action (self ):
+        return self .current_state 
