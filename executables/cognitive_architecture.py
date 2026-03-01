@@ -27,6 +27,8 @@ from src.modules.motion_control import (
     plan_path, DriveController, PIDController, grasp_target_stepper,
 )
 from src.modules.state_estimation import ParticleFilter
+from src.modules.knowledge_reasoning import KnowledgeBase
+from src.modules.learning import Learning
 
 # ── perception error statistics from 5-trial benchmark ──────────────────
 PERCEPTION_ERROR_MEAN = 0.1704
@@ -133,6 +135,37 @@ def main():
     scene = build_world(physics_client=cid)
     rid = scene["robot_id"]
     init_pos = scene.get("robot_position", [-3.0, -3.0, 0.2])
+
+    # ── Knowledge Base (M8 — Prolog via PySwip) ────────────────────────
+    kb = KnowledgeBase()
+    obs_color_names = scene.get("obstacle_colors",
+                                ["blue", "pink", "orange", "yellow", "black"])
+    scene_config = {
+        "table": {"pos": tuple(scene["table_position"]),
+                  "mass": 10.0, "color": "brown", "shape": "box"},
+    }
+    for i, (pos, cname) in enumerate(
+            zip(scene["obstacle_positions"], obs_color_names)):
+        scene_config[f"obs_{cname.lower()}"] = {
+            "pos": tuple(pos), "mass": 10.0,
+            "color": cname.lower(), "shape": "cube",
+        }
+    kb.load_initial_map(scene_config)
+    print(f"Knowledge base loaded: {len(scene_config)} objects "
+          f"(target excluded — must be perceived)")
+
+    # ── Learning system (M9 — Q-learning PID tuner) ─────────────────────
+    learner = Learning(save_path="q_learning_state.json")
+    learned_params = learner.get_optimized_parameters()
+    learned_pid = PIDController(
+        kp_lin=learned_params.get("Kp", 0.8),
+        ki_lin=learned_params.get("Ki", 0.0),
+        kd_lin=learned_params.get("Kd", 0.1),
+        kp_ang=3.0, max_lin=0.6, max_ang=4.0,
+    )
+    print(f"Learning system loaded: Kp={learned_pid.kp_lin:.3f}, "
+          f"Ki={learned_pid.ki_lin:.3f}, Kd={learned_pid.kd_lin:.3f}, "
+          f"ε={learner.tuner.epsilon:.4f}")
 
     # ── Particle-filter infrastructure ──────────────────────────────────
     # Body-ID → landmark-ID mapping (table=0, obstacles=1..5)
@@ -262,6 +295,12 @@ def main():
     target_est_3d   = None
     grasp_gen       = None
     nudge_attempts  = 0
+
+    # ── Learning metrics ────────────────────────────────────────────────
+    total_drive_steps = 0
+    grasp_success     = False
+    trial_collided    = False
+    drive_start_time  = None
 
     print("\nStarting main loop …\n")
 
@@ -490,7 +529,9 @@ def main():
                 print(f"  Oriented robot: yaw={np.rad2deg(dyaw):+.1f}°")
 
             drive_ctrl = DriveController(rid, waypoints,
+                                         pid=learned_pid,
                                          goal_tol=0.15, max_steps=30000)
+            drive_start_time = time.time()
             print("  Driving toward target vicinity …")
             pf_active = True
             phase = ACT
@@ -505,6 +546,7 @@ def main():
             pos = pf_pos
             yaw = pf_yaw
             still_driving = drive_ctrl.step(pos, yaw)
+            total_drive_steps += 1
 
             if not still_driving:
                 if table_centroid_xy:
@@ -640,11 +682,18 @@ def main():
                     print(f"  XY Error    : {result['position_error_xy']:.4f} m")
                     print(f"  Points used : {result['n_pts']}")
                     print(f"{'='*60}")
+                    # ── Update KB with perceived target ──
+                    kb.perceive_target(est[0], est[1], est[2])
+                    print("  KB updated: perceive_target asserted.")
                 else:
                     # Fall back to initial estimate
                     if initial_target_est_3d is not None:
                         target_est_3d = initial_target_est_3d
+                        kb.perceive_target(float(target_est_3d[0]),
+                                           float(target_est_3d[1]),
+                                           float(target_est_3d[2]))
                         print("  Using initial arm-camera estimate for grasp.")
+                        print("  KB updated: perceive_target (fallback).")
                     else:
                         print("  Target not visible — cannot grasp.")
                         target_est_3d = None
@@ -652,7 +701,15 @@ def main():
             tick += 1
             if tick >= 10:
                 if target_est_3d is not None:
-                    phase = THINK2
+                    # ── KB affordance check before committing to grasp ──
+                    grasp_ok, grasp_reason = kb.verify_grasp_conditions()
+                    print(f"\n  KB grasp check: {'PASS' if grasp_ok else 'FAIL'}")
+                    print(f"    Reason: {grasp_reason}")
+                    if grasp_ok:
+                        phase = THINK2
+                    else:
+                        print("  KB denied grasp — skipping to DONE.")
+                        phase = DONE
                 else:
                     phase = DONE
                 tick = 0
@@ -737,6 +794,7 @@ def main():
                     print(f"  Oriented robot: yaw={np.rad2deg(dyaw2):+.1f} deg")
 
                 drive_ctrl = DriveController(rid, waypoints2,
+                                             pid=learned_pid,
                                              goal_tol=0.08, max_steps=25000)
                 print("  Driving closer to target …")
                 pf_active = True
@@ -755,6 +813,7 @@ def main():
             pos = pf_pos2
             yaw = pf_yaw2
             still = drive_ctrl.step(pos, yaw)
+            total_drive_steps += 1
 
             if not still:
                 tgt_xy = target_est_3d[:2]
@@ -809,7 +868,8 @@ def main():
                         _reinit_pf(new_x, new_y, ny)
                         nudge_wps = [(new_x, new_y), nudge_xy]
                         drive_ctrl = DriveController(
-                            rid, nudge_wps, goal_tol=0.05, max_steps=15000)
+                            rid, nudge_wps, pid=learned_pid,
+                            goal_tol=0.05, max_steps=15000)
                         # Stay in ACT2 for the nudge
 
         # ═════════════════════════════════════════════════════════════════
@@ -835,8 +895,10 @@ def main():
                 tgt_pos = get_object_position(target_id)
                 if tgt_pos[2] > 0.75:
                     print(f"  Target lifted to z={tgt_pos[2]:.3f} — SUCCESS!")
+                    grasp_success = True
                 else:
                     print(f"  Target at z={tgt_pos[2]:.3f} — may not be grasped.")
+                    grasp_success = False
                 phase = DONE
                 tick  = 0
 
@@ -844,6 +906,34 @@ def main():
         #  DONE — idle
         # ═════════════════════════════════════════════════════════════════
         elif phase == DONE:
+            if tick == 0:
+                # ── Update learning system with trial results ──
+                settling = (time.time() - drive_start_time
+                            if drive_start_time else 30.0)
+                trial_data = {
+                    "success":   grasp_success,
+                    "collided":  trial_collided,
+                    "performance_metrics": {
+                        "overshoot":          0.0,
+                        "steady_state_error":  0.0 if grasp_success else 0.3,
+                        "settling_time":       settling,
+                        "torque_violation":    0.0,
+                        "energy_consumption":  float(total_drive_steps),
+                    },
+                }
+                learner.update_from_trial(trial_data)
+                new_p = learner.get_optimized_parameters()
+                print(f"\n{'='*60}")
+                print("LEARNING: Trial feedback recorded")
+                print(f"{'='*60}")
+                print(f"  Grasp success : {grasp_success}")
+                print(f"  Settling time : {settling:.1f}s")
+                print(f"  Drive steps   : {total_drive_steps}")
+                print(f"  Updated params: Kp={new_p['Kp']:.3f}, "
+                      f"Ki={new_p['Ki']:.3f}, Kd={new_p['Kd']:.3f}")
+                print(f"  ε (exploration): {learner.tuner.epsilon:.4f}")
+                print(f"  Saved to q_learning_state.json")
+                print(f"{'='*60}")
             tick += 1
             if tick >= args.steps:
                 break
