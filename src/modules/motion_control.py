@@ -794,17 +794,17 @@ def grasp_target_stepper(robot_id, target_pos_3d):
     for _ in range(120):
         yield
 
-    # ── 2. Pre-grasp: 15 cm above target ──
-    pre_z = tz + 0.15
+    # ── 2. Pre-grasp: 10 cm above target ──
+    pre_z = tz + 0.10
     print(f"  [2/5] Moving to pre-grasp ({tx:+.3f}, {ty:+.3f}, {pre_z:+.3f}) …")
     _apply_arm_ik(robot_id, [tx, ty, pre_z], grasp_orn)
     for _ in range(400):
         yield
 
     # ── 3. Lower to grasp height ──
-    # The target's centre is at tz; grasp slightly above centre so fingers
-    # straddle the cylinder.
-    grasp_z = tz + 0.02
+    # PCA systematically over-estimates z by ~0.04 m (sees top surface).
+    # Subtract 0.04 so the gripper straddles the cylinder centre.
+    grasp_z = tz - 0.04
     print(f"  [3/5] Lowering to grasp ({tx:+.3f}, {ty:+.3f}, {grasp_z:+.3f}) …")
     _apply_arm_ik(robot_id, [tx, ty, grasp_z], grasp_orn)
     for _ in range(400):
@@ -814,15 +814,19 @@ def grasp_target_stepper(robot_id, target_pos_3d):
     print("  [4/5] Closing gripper …")
     for gj in _GRIPPER_JOINT_IDS:
         p.setJointMotorControl2(robot_id, gj, p.POSITION_CONTROL,
-                                targetPosition=0.0, force=100)
-    for _ in range(200):
+                                targetPosition=0.005, force=200)
+    for _ in range(300):
         yield
 
-    # ── 5. Lift object ──
-    lift_z = tz + 0.20
+    # ── 5. Lift object (keep gripper closed) ──
+    lift_z = tz + 0.15
     print(f"  [5/5] Lifting to ({tx:+.3f}, {ty:+.3f}, {lift_z:+.3f}) …")
     _apply_arm_ik(robot_id, [tx, ty, lift_z], grasp_orn)
-    for _ in range(400):
+    # Keep re-commanding gripper closed during lift to maintain grip
+    for _ in range(500):
+        for gj in _GRIPPER_JOINT_IDS:
+            p.setJointMotorControl2(robot_id, gj, p.POSITION_CONTROL,
+                                    targetPosition=0.005, force=200)
         yield
 
     print("  Grasp sequence complete.")

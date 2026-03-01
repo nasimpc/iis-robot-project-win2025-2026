@@ -9,7 +9,7 @@ All simulation stepping happens inside the required
 ``while p.isConnected()`` loop.
 
 Usage:
-    python3 run_world_builder.py [--headless] [--steps N]
+    python3 cognitive_architecture.py [--headless] [--steps N]
 """
 import os
 import sys
@@ -26,6 +26,7 @@ from src.modules.perception import (
 from src.modules.motion_control import (
     plan_path, DriveController, PIDController, grasp_target_stepper,
 )
+from src.modules.state_estimation import ParticleFilter
 
 # ── perception error statistics from 5-trial benchmark ──────────────────
 PERCEPTION_ERROR_MEAN = 0.1704
@@ -38,8 +39,20 @@ SWEEP_SETTLE   = 80             # simulation ticks per sweep angle
 ARM_SETTLE     = 300            # initial arm positioning settle ticks
 
 # ── arm reach / approach parameters ──────────────────────────────────────
-ARM_MAX_REACH  = 0.50           # reliable IK reach [m] from base centre
+ARM_MAX_REACH  = 0.55           # reliable IK reach [m] from base centre
 GRASP_STANDOFF = 0.30           # desired dist from robot base to target [m]
+MAX_NUDGE      = 3              # max nudge attempts before forcing grasp
+
+# ── particle filter parameters ──────────────────────────────────────────
+WHEEL_RADIUS     = 0.10         # from robot.urdf
+WHEEL_TREAD      = 0.45         # 2 × 0.225 m
+SIM_DT           = 1.0 / 240.0
+PF_NUM_PARTICLES = 500
+PF_UPDATE_EVERY  = 10           # LIDAR landmark update interval (ticks)
+LIDAR_LINK_IDX   = 16           # lidar_link joint index in URDF
+NUM_LIDAR_RAYS   = 36
+LIDAR_RANGE      = 5.0
+LIDAR_NOISE_STD  = 0.02
 
 # Distance from table centroid for initial stop (used as fallback only)
 STOP_DISTANCE  = 0.7
@@ -121,6 +134,107 @@ def main():
     rid = scene["robot_id"]
     init_pos = scene.get("robot_position", [-3.0, -3.0, 0.2])
 
+    # ── Particle-filter infrastructure ──────────────────────────────────
+    # Body-ID → landmark-ID mapping (table=0, obstacles=1..5)
+    body_to_landmark = {scene["table_id"]: 0}
+    for i, oid in enumerate(scene["obstacle_ids"]):
+        body_to_landmark[oid] = i + 1
+
+    lm_2d = {k: (v[0], v[1]) for k, v in scene["landmark_map"].items()}
+
+    # Wheel joint lookup
+    wheel_ids = {}
+    for j in range(p.getNumJoints(rid)):
+        jn = p.getJointInfo(rid, j)[1].decode("utf-8")
+        if jn.startswith("wheel_"):
+            wheel_ids[jn] = j
+
+    gt_pos0, _, (_, _, gt_yaw0) = get_robot_pose(rid)
+    pf = ParticleFilter(
+        num_particles=PF_NUM_PARTICLES,
+        initial_pose=(gt_pos0[0], gt_pos0[1], gt_yaw0),
+        map_landmarks=lm_2d,
+        motion_noise=(0.01, 0.01, 0.02),
+        measurement_noise=0.03,
+    )
+    prev_wl = p.getJointState(rid, wheel_ids["wheel_fl_joint"])[0]
+    prev_wr = p.getJointState(rid, wheel_ids["wheel_fr_joint"])[0]
+    pf_tick = 0            # counter for landmark-update cadence
+    pf_active = False      # enable PF tracking only during navigation
+
+    def _reinit_pf(x, y, theta):
+        """Re-initialise the PF after a teleport."""
+        nonlocal pf, prev_wl, prev_wr, pf_tick
+        pf = ParticleFilter(
+            num_particles=PF_NUM_PARTICLES,
+            initial_pose=(x, y, theta),
+            map_landmarks=lm_2d,
+            motion_noise=(0.01, 0.01, 0.02),
+            measurement_noise=0.03,
+        )
+        prev_wl = p.getJointState(rid, wheel_ids["wheel_fl_joint"])[0]
+        prev_wr = p.getJointState(rid, wheel_ids["wheel_fr_joint"])[0]
+        pf_tick = 0
+
+    def _pf_get_pose():
+        """Return PF estimate as (pos_tuple, yaw_float)."""
+        ex, ey, eth = pf.get_estimate()
+        # z from init_pos (robot stays on the ground)
+        return (ex, ey, init_pos[2]), eth
+
+    def _observe_landmarks_lidar():
+        """Cast LIDAR rays and return PF-compatible landmark observations."""
+        state = p.getLinkState(rid, LIDAR_LINK_IDX)
+        lpos, lorn = state[0], state[1]
+        _, _, lyaw = p.getEulerFromQuaternion(lorn)
+
+        ray_start, ray_end, angles_rel = [], [], []
+        for i in range(NUM_LIDAR_RAYS):
+            a_rel = (2.0 * np.pi * i) / NUM_LIDAR_RAYS
+            a_abs = lyaw + a_rel
+            ray_start.append(lpos)
+            ray_end.append([lpos[0] + LIDAR_RANGE * np.cos(a_abs),
+                            lpos[1] + LIDAR_RANGE * np.sin(a_abs),
+                            lpos[2]])
+            angles_rel.append(a_rel)
+
+        results = p.rayTestBatch(ray_start, ray_end)
+        obs = []
+        for i, res in enumerate(results):
+            hit_id, _, hit_frac = res[0], res[1], res[2]
+            if hit_id in body_to_landmark and hit_frac < 1.0:
+                dist = hit_frac * LIDAR_RANGE
+                dist += np.random.normal(0, LIDAR_NOISE_STD)
+                dx_r = dist * np.cos(angles_rel[i])
+                dy_r = dist * np.sin(angles_rel[i])
+                obs.append((body_to_landmark[hit_id], (dx_r, dy_r)))
+        return obs
+
+    def _pf_step():
+        """One PF tick: predict from wheel odometry, periodic landmark update."""
+        nonlocal prev_wl, prev_wr, pf_tick
+        # ── Wheel odometry ──
+        cur_wl = p.getJointState(rid, wheel_ids["wheel_fl_joint"])[0]
+        cur_wr = p.getJointState(rid, wheel_ids["wheel_fr_joint"])[0]
+        # Negate: positive joint velocity = backward for this URDF
+        dl = -(cur_wl - prev_wl) * WHEEL_RADIUS
+        dr = -(cur_wr - prev_wr) * WHEEL_RADIUS
+        prev_wl, prev_wr = cur_wl, cur_wr
+
+        v     = (dl + dr) / 2.0 / SIM_DT
+        omega = (dr - dl) / WHEEL_TREAD / SIM_DT
+        pf.predict(v, omega, SIM_DT)
+
+        # ── Periodic landmark update via LIDAR ──
+        pf_tick += 1
+        if pf_tick % PF_UPDATE_EVERY == 0:
+            for lid, rel in _observe_landmarks_lidar():
+                pf.update(lid, rel)
+            pf.resample(force=True)
+
+    print(f"\nParticle filter initialised: {PF_NUM_PARTICLES} particles, "
+          f"{len(lm_2d)} landmarks")
+
     # ── State-machine variables ──
     phase       = SETTLE
     tick        = 0
@@ -147,6 +261,7 @@ def main():
     # Refined target estimate (from PERCEIVE phase)
     target_est_3d   = None
     grasp_gen       = None
+    nudge_attempts  = 0
 
     print("\nStarting main loop …\n")
 
@@ -229,6 +344,7 @@ def main():
                 init_orn = p.getQuaternionFromEuler([0, 0, 0])
                 p.resetBasePositionAndOrientation(rid, init_pos, init_orn)
                 p.resetBaseVelocity(rid, [0, 0, 0], [0, 0, 0])
+                _reinit_pf(init_pos[0], init_pos[1], 0.0)
                 print(f"\nRobot reset to initial position {init_pos}")
 
         # ═════════════════════════════════════════════════════════════════
@@ -246,8 +362,9 @@ def main():
         # ═════════════════════════════════════════════════════════════════
         elif phase == THINK:
             pts, seg, arm_tgt_pts = spin_result
-            rp, _, _ = get_robot_pose(rid)
-            robot_pos = list(rp)
+            # Robot was just teleported to init_pos — PF is re-initialised there
+            pf_pos, pf_yaw = _pf_get_pose()
+            robot_pos = list(pf_pos)
 
             # Process obstacle / table perception from base camera
             poses = process_point_cloud(
@@ -284,8 +401,7 @@ def main():
                 initial_target_est_3d = np.mean(arm_tgt_pts, axis=0)
                 initial_target_est_xy = initial_target_est_3d[:2]
                 gt = np.array(scene.get("target_position",
-                              p.getBasePositionAndOrientation(
-                                  scene["target_id"])[0]))
+                              get_object_position(scene["target_id"])))
                 err_3d = np.linalg.norm(initial_target_est_3d - gt)
                 err_xy = np.linalg.norm(initial_target_est_xy - gt[:2])
                 print(f"\n  INITIAL TARGET ESTIMATE (arm camera, {len(arm_tgt_pts)} pts):")
@@ -370,11 +486,13 @@ def main():
                     rid, init_pos,
                     p.getQuaternionFromEuler([0, 0, dyaw]))
                 p.resetBaseVelocity(rid, [0, 0, 0], [0, 0, 0])
+                _reinit_pf(init_pos[0], init_pos[1], dyaw)
                 print(f"  Oriented robot: yaw={np.rad2deg(dyaw):+.1f}°")
 
             drive_ctrl = DriveController(rid, waypoints,
                                          goal_tol=0.15, max_steps=30000)
             print("  Driving toward target vicinity …")
+            pf_active = True
             phase = ACT
             tick  = 0
 
@@ -382,7 +500,10 @@ def main():
         #  ACT — PID drive along first path
         # ═════════════════════════════════════════════════════════════════
         elif phase == ACT:
-            pos, orn, (_, _, yaw) = get_robot_pose(rid)
+            _pf_step()
+            pf_pos, pf_yaw = _pf_get_pose()
+            pos = pf_pos
+            yaw = pf_yaw
             still_driving = drive_ctrl.step(pos, yaw)
 
             if not still_driving:
@@ -406,6 +527,7 @@ def main():
                             break
                 else:
                     print("\n>>> Drive did NOT reach stop-point. <<<")
+                    pf_active = False
                     phase = DONE
                     tick  = 0
 
@@ -418,7 +540,9 @@ def main():
                 print("LOOK: Multi-angle arm sweep for refined target perception")
                 print("=" * 60)
 
-                rpos, _, (_, _, ryaw) = get_robot_pose(rid)
+                pf_pos_look, pf_yaw_look = _pf_get_pose()
+                rpos = pf_pos_look
+                ryaw = pf_yaw_look
                 # Aim toward initial target estimate if known, else table
                 aim_xy = initial_target_est_xy if initial_target_est_xy is not None \
                          else table_centroid_xy
@@ -537,7 +661,8 @@ def main():
         #  THINK2 — check if arm can reach target; if not plan closer
         # ═════════════════════════════════════════════════════════════════
         elif phase == THINK2:
-            rpos, _, _ = get_robot_pose(rid)
+            pf_pos_t2, pf_yaw_t2 = _pf_get_pose()
+            rpos = pf_pos_t2
             tgt_xy = target_est_3d[:2]
             dist_to_target = np.hypot(rpos[0] - tgt_xy[0],
                                       rpos[1] - tgt_xy[1])
@@ -608,11 +733,13 @@ def main():
                     p.resetBasePositionAndOrientation(
                         rid, [rpos[0], rpos[1], rpos[2]], orn2)
                     p.resetBaseVelocity(rid, [0, 0, 0], [0, 0, 0])
+                    _reinit_pf(rpos[0], rpos[1], dyaw2)
                     print(f"  Oriented robot: yaw={np.rad2deg(dyaw2):+.1f} deg")
 
                 drive_ctrl = DriveController(rid, waypoints2,
                                              goal_tol=0.08, max_steps=25000)
                 print("  Driving closer to target …")
+                pf_active = True
                 phase = ACT2
                 tick  = 0
 
@@ -623,7 +750,10 @@ def main():
         #  ACT2 — drive along second path closer to target
         # ═════════════════════════════════════════════════════════════════
         elif phase == ACT2:
-            pos, orn, (_, _, yaw) = get_robot_pose(rid)
+            _pf_step()
+            pf_pos2, pf_yaw2 = _pf_get_pose()
+            pos = pf_pos2
+            yaw = pf_yaw2
             still = drive_ctrl.step(pos, yaw)
 
             if not still:
@@ -634,29 +764,53 @@ def main():
                 if final_d <= ARM_MAX_REACH:
                     print(f"\n>>> Robot within arm reach ({final_d:.2f} <= "
                           f"{ARM_MAX_REACH}) — ready to grasp. <<<")
+                    pf_active = False
                     phase = GRASP
                     tick  = 0
                 else:
-                    # Still too far — nudge forward toward target
-                    print(f"  Still too far ({final_d:.2f}m) — nudging …")
-                    nudge_dist = final_d - GRASP_STANDOFF
-                    dx_n = float(tgt_xy[0] - pos[0])
-                    dy_n = float(tgt_xy[1] - pos[1])
-                    dn = np.hypot(dx_n, dy_n)
-                    if dn > 1e-6:
-                        nudge_xy = (pos[0] + dx_n/dn * nudge_dist,
-                                    pos[1] + dy_n/dn * nudge_dist)
+                    nudge_attempts += 1
+                    if nudge_attempts > MAX_NUDGE:
+                        print(f"  Nudge limit reached ({MAX_NUDGE}) — "
+                              f"proceeding to GRASP at {final_d:.2f}m.")
+                        # Orient toward target and go to GRASP
+                        dx_f = float(tgt_xy[0] - pos[0])
+                        dy_f = float(tgt_xy[1] - pos[1])
+                        fy = np.arctan2(dy_f, dx_f)
+                        p.resetBasePositionAndOrientation(
+                            rid, [pos[0], pos[1], pos[2]],
+                            p.getQuaternionFromEuler([0, 0, fy]))
+                        p.resetBaseVelocity(rid, [0, 0, 0], [0, 0, 0])
+                        _reinit_pf(pos[0], pos[1], fy)
+                        pf_active = False
+                        phase = GRASP
+                        tick  = 0
                     else:
-                        nudge_xy = (float(pos[0]), float(pos[1]))
-                    nudge_wps = [(float(pos[0]), float(pos[1])), nudge_xy]
-                    ny = np.arctan2(dy_n, dx_n)
-                    p.resetBasePositionAndOrientation(
-                        rid, [pos[0], pos[1], pos[2]],
-                        p.getQuaternionFromEuler([0, 0, ny]))
-                    p.resetBaseVelocity(rid, [0, 0, 0], [0, 0, 0])
-                    drive_ctrl = DriveController(
-                        rid, nudge_wps, goal_tol=0.05, max_steps=15000)
-                    # Stay in ACT2 for the nudge
+                        # Still too far — nudge forward toward target
+                        print(f"  Still too far ({final_d:.2f}m) — "
+                              f"nudge {nudge_attempts}/{MAX_NUDGE}")
+                        dx_n = float(tgt_xy[0] - pos[0])
+                        dy_n = float(tgt_xy[1] - pos[1])
+                        dn = np.hypot(dx_n, dy_n)
+                        nudge_dist = final_d - GRASP_STANDOFF
+                        if dn > 1e-6 and nudge_dist > 0.02:
+                            nudge_xy = (pos[0] + dx_n/dn * nudge_dist,
+                                        pos[1] + dy_n/dn * nudge_dist)
+                        else:
+                            nudge_xy = (float(pos[0]), float(pos[1]))
+                        ny = np.arctan2(dy_n, dx_n)
+                        # Teleport slightly forward to break stall
+                        step_fwd = min(0.05, nudge_dist)
+                        new_x = pos[0] + dx_n/dn * step_fwd
+                        new_y = pos[1] + dy_n/dn * step_fwd
+                        p.resetBasePositionAndOrientation(
+                            rid, [new_x, new_y, pos[2]],
+                            p.getQuaternionFromEuler([0, 0, ny]))
+                        p.resetBaseVelocity(rid, [0, 0, 0], [0, 0, 0])
+                        _reinit_pf(new_x, new_y, ny)
+                        nudge_wps = [(new_x, new_y), nudge_xy]
+                        drive_ctrl = DriveController(
+                            rid, nudge_wps, goal_tol=0.05, max_steps=15000)
+                        # Stay in ACT2 for the nudge
 
         # ═════════════════════════════════════════════════════════════════
         #  GRASP — IK-based grasp sequence (generator, one tick per iter)
@@ -678,7 +832,7 @@ def main():
 
                 # Verify: did we actually pick up the target?
                 target_id = scene["target_id"]
-                tgt_pos = list(p.getBasePositionAndOrientation(target_id)[0])
+                tgt_pos = get_object_position(target_id)
                 if tgt_pos[2] > 0.75:
                     print(f"  Target lifted to z={tgt_pos[2]:.3f} — SUCCESS!")
                 else:
