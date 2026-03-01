@@ -14,7 +14,7 @@ import matplotlib
 matplotlib.use("Agg")                       # headless-safe backend
 import matplotlib.pyplot as plt
 from typing import Dict, List, Set
-from src.environment.world_builder import get_robot_pose
+from src.environment.world_builder import get_robot_pose, get_object_position
 
 # ── camera settings (must match sensor_wrapper / getCameraImage call) ───────
 CAM_W, CAM_H = 320, 240
@@ -863,11 +863,10 @@ def perceive_target_with_arm_camera(robot_id: int,
     print(f"    Extent 3D : ({extent_3d[0]:.4f} × {extent_3d[1]:.4f}"
           + (f" × {extent_3d[2]:.4f})" if len(extent_3d) > 2 else ")"))
 
-    # ── ground truth ──
+    # ── ground truth (via authorised world_builder wrapper) ──
     gt_pos = scene_map.get("target_position")
     if gt_pos is None:
-        # fallback: query PyBullet
-        gt_pos = list(p.getBasePositionAndOrientation(target_id)[0])
+        gt_pos = get_object_position(target_id)
     gt_pos = np.array(gt_pos, dtype=float)
 
     pos_error = float(np.linalg.norm(centroid_3d - gt_pos))
