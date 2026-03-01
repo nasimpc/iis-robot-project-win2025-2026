@@ -71,6 +71,7 @@ The robot agent is a **mobile manipulator** with clearly defined physical constr
 
 | Sensor | Location | Dimensions | Purpose |
 |--------|----------|------------|---------|
+| **LIDAR** | Base (front-top) | Cylinder (r=0.03m, h=0.02m) | 2D laser scanning / obstacle detection |
 | **IMU** | Base (top-center) | 0.02m × 0.02m × 0.01m | Orientation, acceleration |
 | **RGB-D Camera** | End effector | 0.05m × 0.15m × 0.03m | Visual perception, depth sensing |
 
@@ -80,9 +81,9 @@ The robot agent is a **mobile manipulator** with clearly defined physical constr
 |-----------|-----------|
 | Base | 20.0 |
 | Wheels (4×) | 4.0 |
-| Arm + Gripper | ~7.5 |
-| Sensors | ~0.11 |
-| **Total** | **~31.6 kg** |
+| Arm + Gripper | ~8.0 |
+| Sensors | ~0.31 |
+| **Total** | **~32.31 kg** |
 
 ---
 
@@ -248,10 +249,8 @@ SEARCH → NAVIGATE → GRASP → LIFT
 | Condition | Response |
 |-----------|----------|
 | Unexpected collision | Immediate stop, back off |
-| Target lost during grasp | Re-perceive, retry |
+| Target lost during grasp | Search |
 | Path blocked | Re-plan navigation |
-| Joint limit approach | Soft limit enforcement |
-| Communication loss | Safe stop position |
 
 ---
 
